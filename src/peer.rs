@@ -1,21 +1,14 @@
 mod peers_map;
 
 use crate::message::Message;
-
+use log::info;
 use message_io::events::EventQueue;
 use message_io::network::{Endpoint, NetEvent, Network, Transport};
-
-// todo test
-
-
-use std::fmt::Display;
+use peers_map::{PeerAddr, PeersMap};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-
-use peers_map::{PeerAddr, PeersMap};
-// use rand::prelude::*;
 
 pub struct Peer {
     peers: Arc<Mutex<peers_map::PeersMap>>,
@@ -99,8 +92,6 @@ impl Peer {
                             send_message(&mut self.network.lock().unwrap(), message_sender, &msg);
                         }
                         Message::TakePeersList(addrs) => {
-                            println!("Taking peers: {:?}", addrs);
-
                             let filtered: Vec<&SocketAddr> = addrs
                                 .iter()
                                 .filter_map(|x| {
@@ -139,7 +130,12 @@ impl Peer {
                             }
                         }
                         Message::Info(text) => {
-                            let pub_addr = self.peers.lock().unwrap().get_pub_addr(&message_sender).unwrap();
+                            let pub_addr = self
+                                .peers
+                                .lock()
+                                .unwrap()
+                                .get_pub_addr(&message_sender)
+                                .unwrap();
                             log_message_received(&pub_addr, &text);
                         }
                     }
@@ -177,7 +173,13 @@ impl Peer {
                 let msg_text = generate_random_message();
                 let msg = Message::Info(msg_text.clone());
 
-                log_sending_message(&msg_text, &receivers.iter().map(|PeerAddr { public, .. }| public).collect());
+                log_sending_message(
+                    &msg_text,
+                    &receivers
+                        .iter()
+                        .map(|PeerAddr { public, .. }| public)
+                        .collect(),
+                );
 
                 for PeerAddr { endpoint, .. } in receivers {
                     send_message(&mut network, endpoint, &msg);
@@ -195,8 +197,6 @@ fn send_message(network: &mut Network, to: Endpoint, msg: &Message) {
 fn generate_random_message() -> String {
     petname::Petnames::default().generate_one(2, "-")
 }
-
-
 
 trait ToSocketAddr {
     fn get_addr(&self) -> SocketAddr;
@@ -241,7 +241,7 @@ fn format_list_of_addrs<T: ToSocketAddr>(items: &Vec<T>) -> String {
 }
 
 fn log_message_received<T: ToSocketAddr>(from: &T, text: &str) {
-    println!(
+    info!(
         "Received message [{}] from \"{}\"",
         text,
         ToSocketAddr::get_addr(from)
@@ -249,15 +249,15 @@ fn log_message_received<T: ToSocketAddr>(from: &T, text: &str) {
 }
 
 fn log_my_address<T: ToSocketAddr>(addr: &T) {
-    println!("My address is \"{}\"", ToSocketAddr::get_addr(addr));
+    info!("My address is \"{}\"", ToSocketAddr::get_addr(addr));
 }
 
 fn log_connected_to_the_peers<T: ToSocketAddr>(peers: &Vec<T>) {
-    println!("Connected to the peers at {}", format_list_of_addrs(peers));
+    info!("Connected to the peers at {}", format_list_of_addrs(peers));
 }
 
 fn log_sending_message<T: ToSocketAddr>(message: &str, receivers: &Vec<T>) {
-    println!(
+    info!(
         "Sending message [{}] to {}",
         message,
         format_list_of_addrs(receivers)

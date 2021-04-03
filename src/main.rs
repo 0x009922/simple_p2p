@@ -1,12 +1,11 @@
-#[macro_use]
-extern crate clap;
-
+mod logger;
 mod message;
 mod peer;
-use peer::Peer;
-use clap::{App, Arg};
 
-fn main() -> std::io::Result<()> {
+use clap::{value_t, App, Arg};
+use peer::Peer;
+
+fn main() {
     let arg_matches = App::new("simple_p2p")
         .version("0.1.0")
         .author("0x009922 <a.marcius26@gmail.com>")
@@ -37,7 +36,7 @@ fn main() -> std::io::Result<()> {
     let period = value_t!(arg_matches, "period", u32).unwrap();
     let connect = value_t!(arg_matches, "connect", String).ok();
 
-    Peer::new(port, period, connect).unwrap().run();
+    logger::init();
 
-    Ok(())
+    Peer::new(port, period, connect).unwrap().run();
 }

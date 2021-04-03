@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
 #[derive(Serialize, Deserialize)]
@@ -12,7 +12,7 @@ pub enum Message {
     TakePeersList(Vec<SocketAddr>),
 
     // Some random message
-    Info(String)
+    Info(String),
 }
 
 // impl Message {
