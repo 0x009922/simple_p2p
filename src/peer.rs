@@ -1,19 +1,30 @@
+mod peers_map;
+
 use crate::message::Message;
+
 use message_io::events::EventQueue;
 use message_io::network::{Endpoint, NetEvent, Network, Transport};
 
+// todo test
+
+
+use std::fmt::Display;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use peers_map::{PeerAddr, PeersMap};
+// use rand::prelude::*;
 
 pub struct Peer {
-    peers: peers_map::PeersMap,
+    peers: Arc<Mutex<peers_map::PeersMap>>,
     public_addr: SocketAddr,
     period: u32,
-    network: Network,
+    network: Arc<Mutex<Network>>,
     event_queue: EventQueue<NetEvent>,
     connect: Option<String>,
 }
-
-
 
 impl Peer {
     pub fn new(port: u32, period: u32, connect: Option<String>) -> Result<Self, String> {
@@ -23,60 +34,43 @@ impl Peer {
         let listen_addr = format!("127.0.0.1:{}", port);
         match network.listen(Transport::FramedTcp, &listen_addr) {
             Ok((_, addr)) => {
-                println!("Listening on {}", listen_addr);
+                log_my_address(&addr);
+
                 Ok(Self {
                     event_queue,
-                    network,
+                    network: Arc::new(Mutex::new(network)),
                     period,
                     connect,
                     public_addr: addr,
-                    peers: peers_map::PeersMap::new(addr),
+                    peers: Arc::new(Mutex::new(PeersMap::new(addr))),
                 })
             }
             Err(_) => Err(format!("Can not listen on {}", listen_addr)),
         }
-
-        // // Connection to the first peer
-        // let connect_peer = connect;
-        // match network.connect(Transport::FramedTcp, connect_peer) {
-        //     Ok((endpoint, _)) => {
-        //         let mut peers: HashSet<Endpoint> = HashSet::new();
-        //         peers.insert(endpoint);
-
-        //         println!("Connected to {}", connect);
-
-        //         Ok(Self {
-        //             event_queue,
-        //             network,
-        //             emit_period: period,
-        //             peers,
-        //         })
-        //     }
-        //     Err(_) => {
-        //         Err(format!(
-        //             "Can not connect to the discovery server at {}",
-        //             connect_peer
-        //         ))
-        //     }
-        // }
     }
 
     pub fn run(mut self) {
-        // firstly peer should take all existing peers and connect to them
-        // then, peer should send to each of them a random message every N seconds
-        // and peer should listen to messages and handle them
-
         if let Some(addr) = &self.connect {
+            let mut network = self.network.lock().unwrap();
+
             // Connection to the first peer
-            match self.network.connect(Transport::FramedTcp, addr) {
+            match network.connect(Transport::FramedTcp, addr) {
                 Ok((endpoint, _)) => {
-                    self.peers.add_old_one(endpoint);
+                    {
+                        let mut peers = self.peers.lock().unwrap();
+                        peers.add_old_one(endpoint);
+                    }
 
                     // Передаю свой публичный адрес
-                    self.send_message(endpoint, Message::MyPubAddr(self.public_addr.clone()));
+                    send_message(
+                        &mut network,
+                        endpoint,
+                        &Message::MyPubAddr(self.public_addr.clone()),
+                    );
 
                     // Request a list of existing peers
-                    self.send_message(endpoint, Message::GiveMeAListOfPeers);
+                    // Response will be in event queue
+                    send_message(&mut network, endpoint, &Message::GiveMeAListOfPeers);
                 }
                 Err(_) => {
                     println!("Failed to connect to {}", &addr);
@@ -84,12 +78,8 @@ impl Peer {
             }
         }
 
-        // // at this moment in peers set may be only one peer - connection peer
-        // if let Some(connect_peer) = self.peers.iter().next() {
-        //     let message = Message::Info("Hey!".to_owned());
-        //     let output_data = bincode::serialize(&message).unwrap();
-        //     self.network.send(*connect_peer, &output_data);
-        // }
+        // spawning thread which will be send random messages to known peers
+        self.spawn_emit_loop();
 
         loop {
             match self.event_queue.receive() {
@@ -97,152 +87,179 @@ impl Peer {
                 NetEvent::Message(message_sender, input_data) => {
                     match bincode::deserialize(&input_data).unwrap() {
                         Message::MyPubAddr(pub_addr) => {
-                            self.peers.add_new_one(message_sender, pub_addr);
+                            let mut peers = self.peers.lock().unwrap();
+                            peers.add_new_one(message_sender, pub_addr);
                         }
                         Message::GiveMeAListOfPeers => {
-                            let list = self.peers.get_peers_list();
+                            let list = {
+                                let peers = self.peers.lock().unwrap();
+                                peers.get_peers_list()
+                            };
                             let msg = Message::TakePeersList(list);
-                            self.send_message(message_sender, msg);
+                            send_message(&mut self.network.lock().unwrap(), message_sender, &msg);
                         }
                         Message::TakePeersList(addrs) => {
                             println!("Taking peers: {:?}", addrs);
 
-                            let filtered: Vec<SocketAddr> = addrs
+                            let filtered: Vec<&SocketAddr> = addrs
                                 .iter()
                                 .filter_map(|x| {
-                                    // Проверяю, чтобы не было себя и кого-то, к кому есть подключение
-                                    // (а это по идее может быть только текущий отправитель)
-                                    if x != &self.public_addr && x != &message_sender.addr() {
-                                        Some(x.clone())
+                                    // Проверяю, чтобы не было себя
+                                    if x != &self.public_addr {
+                                        Some(x)
                                     } else {
                                         None
                                     }
                                 })
                                 .collect();
 
+                            log_connected_to_the_peers(&filtered);
+
+                            let mut network = self.network.lock().unwrap();
+
                             for peer in filtered {
+                                if peer == &message_sender.addr() {
+                                    continue;
+                                }
+
                                 // к каждому подключиться и послать свой публичный адрес
                                 // и запомнить
 
+                                // connecting to peer
                                 let (endpoint, _) =
-                                    self.network.connect(Transport::FramedTcp, peer).unwrap();
-                                let msg = Message::MyPubAddr(self.public_addr);
-                                self.send_message(endpoint, msg);
+                                    network.connect(Transport::FramedTcp, *peer).unwrap();
 
-                                self.peers.add_old_one(endpoint);
+                                // sending public address
+                                let msg = Message::MyPubAddr(self.public_addr);
+                                send_message(&mut network, endpoint, &msg);
+
+                                // saving peer
+                                self.peers.lock().unwrap().add_old_one(endpoint);
+                                // self.peers.add_old_one(endpoint);
                             }
                         }
                         Message::Info(text) => {
-                            log_message_received(&message_sender, &text);
+                            let pub_addr = self.peers.lock().unwrap().get_pub_addr(&message_sender).unwrap();
+                            log_message_received(&pub_addr, &text);
                         }
                     }
                 }
-                NetEvent::Connected(_, _) => {
-                    // self.register_peer(endpoint);
-                }
+                NetEvent::Connected(_, _) => {}
                 NetEvent::Disconnected(endpoint) => {
-                    self.peers.drop(endpoint);
+                    let mut peers = self.peers.lock().unwrap();
+                    PeersMap::drop(&mut peers, endpoint);
+                    // self.peers.drop(endpoint);
                 }
             }
         }
     }
 
-    // fn register_peer(&mut self, peer: Endpoint, info: PeerInfo) {
-    //     self.peers.insert(peer, info);
-    //     self.check_peers();
-    // }
+    fn spawn_emit_loop(&self) {
+        let sleep_duration = Duration::from_secs(self.period as u64);
+        let peers_mut = Arc::clone(&self.peers);
+        let network_mut = Arc::clone(&self.network);
 
-    // fn unregister_peer(&mut self, peer: Endpoint) {
-    //     self.peers.remove(&peer);
-    //     self.check_peers();
-    // }
+        thread::spawn(move || {
+            // sleeping and sending
+            loop {
+                thread::sleep(sleep_duration);
 
-    // fn check_peers(&self) {
-    //     let formatted: Vec<(SocketAddr, SocketAddr)> = self
-    //         .peers
-    //         .iter()
-    //         .map(|(endpoint, info)| (endpoint.addr(), info.listen_addr.clone()))
-    //         .collect();
-    //     println!("Peers: {:?}", formatted);
-    // }
+                let peers = peers_mut.lock().unwrap();
+                let receivers = peers.receivers();
 
-    fn send_message(&mut self, to: Endpoint, msg: Message) {
-        let output_data = bincode::serialize(&msg).unwrap();
-        self.network.send(to, &output_data);
-    }
-}
+                // if there are no receivers, skip
+                if receivers.len() == 0 {
+                    continue;
+                }
 
-mod peers_map {
-    use message_io::network::Endpoint;
-    use std::collections::HashMap;
-    use std::net::SocketAddr;
+                let mut network = network_mut.lock().unwrap();
 
-    pub struct PeersMap {
-        map: HashMap<Endpoint, PeerInfo>,
-        self_pub_addr: SocketAddr,
-    }
+                let msg_text = generate_random_message();
+                let msg = Message::Info(msg_text.clone());
 
-    #[derive(Debug)]
-    enum PeerInfo {
-        OldOne,
-        NewOne(SocketAddr),
-    }
+                log_sending_message(&msg_text, &receivers.iter().map(|PeerAddr { public, .. }| public).collect());
 
-    impl PeersMap {
-        pub fn new(self_pub_addr: SocketAddr) -> Self {
-            Self {
-                map: HashMap::new(),
-                self_pub_addr
+                for PeerAddr { endpoint, .. } in receivers {
+                    send_message(&mut network, endpoint, &msg);
+                }
             }
-        }
-
-        pub fn add_old_one(&mut self, endpoint: Endpoint) {
-            println!("add old one: {}", endpoint.addr());
-            self.map.insert(endpoint, PeerInfo::OldOne);
-        }
-
-        pub fn add_new_one(&mut self, endpoint: Endpoint, pub_addr: SocketAddr) {
-            println!("add new one: {} ({})", endpoint.addr(), pub_addr);
-            self.map.insert(endpoint, PeerInfo::NewOne(pub_addr));
-        }
-
-        pub fn drop(&mut self, endpoint: Endpoint) {
-            println!("drop: {}", endpoint.addr());
-            self.map.remove(&endpoint);
-        }
-
-        pub fn get_peers_list(&self) -> Vec<SocketAddr> {
-            let mut list: Vec<SocketAddr> = Vec::with_capacity(self.map.len() + 1);
-            list.push(self.self_pub_addr);
-            self.map
-                .iter()
-                .map(|(endpoint, info)| match info {
-                    PeerInfo::OldOne => endpoint.addr(),
-                    PeerInfo::NewOne(public_addr) => public_addr.clone(),
-                })
-                .for_each(|addr| {
-                    list.push(addr);
-                });
-
-            list
-        }
+        });
     }
 }
 
-trait PeerAddrFmt {
-    fn format(&self) -> String;
+fn send_message(network: &mut Network, to: Endpoint, msg: &Message) {
+    let output_data = bincode::serialize(msg).unwrap();
+    network.send(to, &output_data);
 }
 
-impl PeerAddrFmt for Endpoint {
-    fn format(&self) -> String {
-        format!("\"{}\" ({})", self.addr(), self)
+fn generate_random_message() -> String {
+    petname::Petnames::default().generate_one(2, "-")
+}
+
+
+
+trait ToSocketAddr {
+    fn get_addr(&self) -> SocketAddr;
+}
+
+impl ToSocketAddr for Endpoint {
+    fn get_addr(&self) -> SocketAddr {
+        self.addr()
     }
 }
 
-fn log_message_received<T: PeerAddrFmt>(from: &T, text: &str) {
+impl ToSocketAddr for &Endpoint {
+    fn get_addr(&self) -> SocketAddr {
+        self.addr()
+    }
+}
+
+impl ToSocketAddr for SocketAddr {
+    fn get_addr(&self) -> SocketAddr {
+        self.clone()
+    }
+}
+
+impl ToSocketAddr for &SocketAddr {
+    fn get_addr(&self) -> SocketAddr {
+        *self.clone()
+    }
+}
+
+fn format_list_of_addrs<T: ToSocketAddr>(items: &Vec<T>) -> String {
+    if items.len() == 0 {
+        "[no one]".to_owned()
+    } else {
+        let joined = items
+            .iter()
+            .map(|x| format!("\"{}\"", ToSocketAddr::get_addr(x)))
+            .collect::<Vec<String>>()
+            .join(", ");
+
+        format!("[{}]", joined)
+    }
+}
+
+fn log_message_received<T: ToSocketAddr>(from: &T, text: &str) {
     println!(
-        "Received message [{}] from {}",
+        "Received message [{}] from \"{}\"",
         text,
-        PeerAddrFmt::format(from)
+        ToSocketAddr::get_addr(from)
+    );
+}
+
+fn log_my_address<T: ToSocketAddr>(addr: &T) {
+    println!("My address is \"{}\"", ToSocketAddr::get_addr(addr));
+}
+
+fn log_connected_to_the_peers<T: ToSocketAddr>(peers: &Vec<T>) {
+    println!("Connected to the peers at {}", format_list_of_addrs(peers));
+}
+
+fn log_sending_message<T: ToSocketAddr>(message: &str, receivers: &Vec<T>) {
+    println!(
+        "Sending message [{}] to {}",
+        message,
+        format_list_of_addrs(receivers)
     );
 }
