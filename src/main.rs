@@ -5,7 +5,7 @@ mod peer;
 use clap::{value_t, App, Arg};
 use peer::Peer;
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let arg_matches = App::new("simple_p2p")
         .version("0.1.0")
         .author("0x009922 <a.marcius26@gmail.com>")
@@ -32,11 +32,14 @@ fn main() {
         )
         .get_matches();
 
-    let port = value_t!(arg_matches, "port", u32).unwrap();
-    let period = value_t!(arg_matches, "period", u32).unwrap();
+    let port = value_t!(arg_matches, "port", u32)?;
+    let period = value_t!(arg_matches, "period", u32)?;
     let connect = value_t!(arg_matches, "connect", String).ok();
 
     logger::init();
 
-    Peer::new(port, period, connect).unwrap().run();
+    let mut peer = Peer::new(port, period, connect)?;
+    peer.run();
+
+    Ok(())
 }

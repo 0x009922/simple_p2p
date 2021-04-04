@@ -20,7 +20,7 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub fn new(port: u32, period: u32, connect: Option<String>) -> Result<Self, String> {
+    pub fn new(port: u32, period: u32, connect: Option<String>) -> anyhow::Result<Self> {
         let (mut network, event_queue) = Network::split();
 
         // Listening own addr
