@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
 
     logger::init();
 
-    let mut peer = Peer::new(port, period, connect)?;
+    let peer = Peer::new(port, period, connect)?;
     peer.run();
 
     Ok(())

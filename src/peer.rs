@@ -25,21 +25,17 @@ impl Peer {
 
         // Listening own addr
         let listen_addr = format!("127.0.0.1:{}", port);
-        match network.listen(Transport::FramedTcp, &listen_addr) {
-            Ok((_, addr)) => {
-                log_my_address(&addr);
+        let (_, addr) = network.listen(Transport::FramedTcp, &listen_addr)?;
+        log_my_address(&addr);
 
-                Ok(Self {
-                    event_queue,
-                    network: Arc::new(Mutex::new(network)),
-                    period,
-                    connect,
-                    public_addr: addr,
-                    peers: Arc::new(Mutex::new(PeersMap::new(addr))),
-                })
-            }
-            Err(_) => Err(format!("Can not listen on {}", listen_addr)),
-        }
+        Ok(Self {
+            event_queue,
+            network: Arc::new(Mutex::new(network)),
+            period,
+            connect,
+            public_addr: addr,
+            peers: Arc::new(Mutex::new(PeersMap::new(addr))),
+        })
     }
 
     pub fn run(mut self) {
