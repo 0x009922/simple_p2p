@@ -1,17 +1,17 @@
-mod peers_map;
+mod peers_storage;
 
 use crate::message::Message;
 use log::info;
 use message_io::events::EventQueue;
 use message_io::network::{Endpoint, NetEvent, Network, Transport};
-use peers_map::{PeerAddr, PeersMap};
+use peers_storage::{PeerAddr, PeersStorage};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 pub struct Peer {
-    peers: Arc<Mutex<peers_map::PeersMap>>,
+    peers: Arc<Mutex<PeersStorage<Endpoint>>>,
     public_addr: SocketAddr,
     period: u32,
     network: Arc<Mutex<Network>>,
@@ -34,7 +34,7 @@ impl Peer {
             period,
             connect,
             public_addr: addr,
-            peers: Arc::new(Mutex::new(PeersMap::new(addr))),
+            peers: Arc::new(Mutex::new(PeersStorage::new(addr))),
         })
     }
 
@@ -139,7 +139,7 @@ impl Peer {
                 NetEvent::Connected(_, _) => {}
                 NetEvent::Disconnected(endpoint) => {
                     let mut peers = self.peers.lock().unwrap();
-                    PeersMap::drop(&mut peers, endpoint);
+                    PeersStorage::drop(&mut peers, endpoint);
                     // self.peers.drop(endpoint);
                 }
             }
